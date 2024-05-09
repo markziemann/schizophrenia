@@ -1,0 +1,342 @@
+---
+title: "Example of using mitch package for Infinium methylation analysis - Schizophrenia EWAS"
+author: "The GMEA team"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    fig_width: 7
+    fig_height: 7
+theme: cosmo
+bibliography: references.bib
+csl: epigenetics.csl
+---
+
+## Introduction
+
+Here we are looking at putting together the easiest possible workflow for the package.
+
+Source code: https://github.com/markziemann/gmea/blob/main/example_workflow/example_workflow.Rmd
+
+## Requirements
+
+Load packages.
+
+Important: ensure that the mitch version used is 1.15.1 or higher.
+
+```{r,packages}
+
+suppressPackageStartupMessages({
+  library("limma")
+  library("IlluminaHumanMethylationEPICanno.ilm10b4.hg19")
+  library("HGNChelper")
+  library("mitch")
+  library("kableExtra")
+})
+
+if( packageVersion("mitch") < "1.15.1") {
+  warning("This workflow requires mitch version 1.15.1 or higher")
+}
+
+```
+
+## Load pathways
+
+Gene ontologies were downloaded in GMT format from MSigDB on 15th Jan 2024[@Liberzon2015-um;@The_Gene_Ontology_Consortium2023-fm].
+The GMT file is read into R using the mitch function `gmt_import()`.
+
+```{r,loadpathways}
+
+gene_sets <- gmt_import("c5.go.v2023.2.Hs.symbols.gmt")
+
+```
+
+## Curate the annotation
+
+One of the critical parts of this workflow is the establishment of probe-gene relationships.
+This controls how the probe data is aggregated to make the gene level scores.
+
+As these annotations are several years old, many of the annotated gene names are no longer
+current.
+To remedy this, the gene names are screened with the HGNChelper package and any defunct
+symbols get updated to the newer gene name, so they will be recognised properly in the
+gene sets.
+
+```{r,anno1}
+
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+myann <- data.frame(anno[,c("UCSC_RefGene_Name","UCSC_RefGene_Group","Islands_Name","Relation_to_Island")])
+gp <- myann[,"UCSC_RefGene_Name",drop=FALSE]
+gp2 <- strsplit(gp$UCSC_RefGene_Name,";")
+names(gp2) <- rownames(gp)
+gp2 <- lapply(gp2,unique)
+gt1 <- stack(gp2)
+colnames(gt1) <- c("gene","probe")
+gt1$probe <- as.character(gt1$probe)
+dim(gt1)
+str(gt1)
+length(unique(gt1$gene))
+
+
+if (! file.exists("new.hgnc.table.rds")) {
+  new.hgnc.table <- getCurrentHumanMap()
+  saveRDS(new.hgnc.table, "new.hgnc.table.rds")
+}
+
+new.hgnc.table <- readRDS("new.hgnc.table.rds")
+fix <- checkGeneSymbols(gt1$gene,map=new.hgnc.table)
+fix2 <- fix[which(fix$x != fix$Suggested.Symbol),]
+length(unique(fix2$x))
+gt1$gene <- fix$Suggested.Symbol
+
+head(gt1)
+
+```
+
+## Mitch pipeline
+
+The first part is to import the data into mitch.
+
+This only works properly when mitch's mapGeneIds function uses `mean` to aggregate (line 69 of mitch.R).
+
+Data files:
+
+* EWAS_ageofonset_asrb_epic.txt.gz
+
+* EWAS_clozapine_asrb_epic.txt.gz
+
+* EWAS_cognitivestatus_asrb_epic.txt.gz
+
+* EWAS_gafscore_asrb_epic.txt.gz
+
+* EWAS_prs_asrb_epic.txt.gz
+
+```{r,load}
+
+ageonset <- read.table("ASRB_EWAS/EWAS_ageofonset_asrb_epic.fmt.txt",sep="\t",header=TRUE)
+colnames(ageonset) <- c("probe","ageonset")
+rownames(ageonset) <- ageonset$probe ; ageonset$probe=NULL
+iageonset <- -ageonset
+
+cloz <- read.table("ASRB_EWAS/EWAS_clozapine_asrb_epic.fmt.txt",sep="\t",header=TRUE)
+colnames(cloz) <- c("probe","cloz")
+rownames(cloz) <- cloz$probe ; cloz$probe=NULL
+
+cognit <- read.table("ASRB_EWAS/EWAS_cognitivestatus_asrb_epic.fmt.txt",sep="\t",header=TRUE)
+colnames(cognit) <- c("probe","cognit")
+rownames(cognit) <- cognit$probe ; cognit$probe=NULL
+
+gaf <- read.table("ASRB_EWAS/EWAS_gafscore_asrb_epic.fmt.txt",sep="\t",header=TRUE)
+colnames(gaf) <- c("probe","gaf")
+rownames(gaf) <- gaf$probe ; gaf$probe=NULL
+igaf <- -gaf
+
+prs <- read.table("ASRB_EWAS/EWAS_prs_asrb_epic.fmt.txt",sep="\t",header=TRUE)
+colnames(prs) <- c("probe","prs")
+rownames(prs) <- prs$probe ; prs$probe=NULL
+
+```
+
+Import data.
+
+```{r,mergit2}
+
+mylist2 <- list("iageonset"=iageonset,"cloz"=cloz,"cognit"=cognit,"igaf"=igaf,"prs"=prs)
+
+mm <- mitch_import(x=mylist2, DEtype="prescored",geneTable=gt1)
+
+```
+
+Multimitch
+
+```{r,multimitch}
+
+mmres <- mitch_calc(x=mm,genesets=gene_sets,minsetsize=5,cores=16,resrows=50,priority="effect")
+
+if (! file.exists("multires.html")){
+  mitch_report(res=mmres,outfile="multires.html")
+}
+
+mmrestop <- mmres$enrichment_result
+mmrestop <-  mmrestop[order(mmrestop$pMANOVA),]
+
+head(mmrestop,30) %>%
+  kbl(caption = "Top results in multi by p-value") %>%
+  kable_paper("hover", full_width = F)
+
+mmrestop <- subset(mmrestop,p.adjustMANOVA<0.05)
+
+mmrestop <- mmrestop[order(-abs(mmrestop$s.dist)),]
+
+head(mmrestop,30) %>%
+  kbl(caption = "Top results in multi by effect size") %>%
+  kable_paper("hover", full_width = F)
+
+
+```
+
+Single mitch for iageonset, cloz, cognit, igaf and prs.
+
+```{r,mitchsingle}
+
+# age of onset
+iageonset_g <- mitch_import(x=iageonset,DEtype="prescored",geneTable=gt1)
+m_iageonset <- mitch_calc(iageonset_g,genesets=gene_sets,cores=16, minsetsize=5, resrows=50, priority="effect")
+head(m_iageonset$enrichment_result,10) %>% kbl(caption = "Top 10 effect size") %>% kable_paper("hover", full_width = F)
+top <- m_iageonset$enrichment_result
+top <- top[order(top$pANOVA),]
+head(top,10) %>% kbl(caption = "Top 10 significance") %>% kable_paper("hover", full_width = F)
+nrow(subset(top,p.adjustANOVA<0.05))
+
+# cloz
+cloz_g <- mitch_import(x=cloz,DEtype="prescored",geneTable=gt1)
+m_cloz <- mitch_calc(cloz_g,genesets=gene_sets,cores=16, minsetsize=5, resrows=50, priority="effect")
+head(m_cloz$enrichment_result,10) %>% kbl(caption = "Top 10 effect size") %>% kable_paper("hover", full_width = F)
+top <- m_cloz$enrichment_result
+top <- top[order(top$pANOVA),]
+head(top,10) %>% kbl(caption = "Top 10 significance") %>% kable_paper("hover", full_width = F)
+nrow(subset(top,p.adjustANOVA<0.05))
+
+# cognit
+cognit_g <- mitch_import(x=cognit,DEtype="prescored",geneTable=gt1)
+m_cognit <- mitch_calc(cognit_g,genesets=gene_sets,cores=16, minsetsize=5, resrows=50, priority="effect")
+head(m_cognit$enrichment_result,10) %>% kbl(caption = "Top 10 effect size") %>% kable_paper("hover", full_width = F)
+top <- m_cognit$enrichment_result
+top <- top[order(top$pANOVA),]
+head(top,10) %>% kbl(caption = "Top 10 significance") %>% kable_paper("hover", full_width = F)
+nrow(subset(top,p.adjustANOVA<0.05))
+
+# igaf
+igaf_g <- mitch_import(x=igaf,DEtype="prescored",geneTable=gt1)
+m_igaf <- mitch_calc(igaf_g,genesets=gene_sets,cores=16, minsetsize=5, resrows=50, priority="effect")
+head(m_igaf$enrichment_result,10) %>% kbl(caption = "Top 10 effect size") %>% kable_paper("hover", full_width = F)
+top <- m_igaf$enrichment_result
+top <- top[order(top$pANOVA),]
+head(top) %>% kbl(caption = "Top 10 significance") %>% kable_paper("hover", full_width = F)
+nrow(subset(top,p.adjustANOVA<0.05))
+
+# prs
+prs_g <- mitch_import(x=prs,DEtype="prescored",geneTable=gt1)
+m_prs <- mitch_calc(prs_g,genesets=gene_sets,cores=16, minsetsize=5, resrows=50, priority="effect")
+head(m_prs$enrichment_result,10) %>% kbl(caption = "Top 10 effect size") %>% kable_paper("hover", full_width = F)
+top <- m_prs$enrichment_result
+top <- top[order(top$pANOVA),]
+head(top,10) %>% kbl(caption = "Top 10 significance") %>% kable_paper("hover", full_width = F)
+nrow(subset(top,p.adjustANOVA<0.05))
+
+```
+
+Now make a barplot of these top findings.
+
+```{r, barplot}
+
+par(mar=c(5,27,5,3))
+
+# iageonset
+top <- m_iageonset$enrichment_result
+top <- top[order(top$pANOVA),]
+top <- subset(top,p.adjustANOVA<0.05)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.7,main="Age of onset",xlab="ES")
+grid()
+
+# cloz
+top <- m_cloz$enrichment_result
+top <- top[order(top$pANOVA),]
+top <- subset(top,p.adjustANOVA<0.05)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.7,main="Clozapine",xlab="ES")
+grid()
+
+# cognitive
+top <- m_cognit$enrichment_result
+top <- top[order(top$pANOVA),]
+top <- subset(top,p.adjustANOVA<0.05)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.6,main="Cognitive function",xlab="ES")
+grid()
+
+# igaf
+top <- m_igaf$enrichment_result
+top <- top[order(top$pANOVA),]
+top <- subset(top,p.adjustANOVA<0.05)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.6,main="iGAF score",xlab="ES")
+grid()
+
+# prs
+top <- m_prs$enrichment_result
+top <- top[order(top$pANOVA),]
+top <- subset(top,p.adjustANOVA<0.05)
+up <- head(subset(top,s.dist>0),20)
+dn <- head(subset(top,s.dist<0),20)
+top <- rbind(up,dn)
+vec=top$s.dist
+names(vec)=top$set
+names(vec) <- gsub("_"," ",names(vec))
+vec <- vec[order(vec)]
+barplot(abs(vec),col=sign(-vec)+3,horiz=TRUE,las=1,cex.names=0.7,main="PRS",xlab="ES")
+grid()
+
+par( mar = c(5.1, 4.1, 4.1, 2.1) )
+
+```
+
+## Reports
+
+```{r,mitchreports}
+
+if(!file.exists("mitch_iageonset.html")) {
+  mitch_report(res=m_iageonset,outfile="mitch_iageonset.html")
+}
+
+if(!file.exists("mitch_cloz.html")) {
+  mitch_report(res=m_cloz,outfile="mitch_cloz.html")
+}
+
+if(!file.exists("mitch_cognit.html")) {
+  mitch_report(res=m_cognit,outfile="mitch_cognit.html")
+}
+
+if(!file.exists("mitch_igaf.html")) {
+  mitch_report(res=m_igaf,outfile="mitch_igaf.html")
+}
+
+if(!file.exists("mitch_prs.html")) {
+  mitch_report(res=m_prs,outfile="mitch_prs.html")
+}
+
+```
+## Session information
+
+```{r,save}
+
+sessionInfo()
+
+```
+
