@@ -17,7 +17,7 @@ csl: epigenetics.csl
 
 Here we are looking at putting together the easiest possible workflow for the package.
 
-Source code: https://github.com/markziemann/gmea/blob/main/example_workflow/example_workflow.Rmd
+Source code: https://github.com/markziemann/schizophrenia
 
 ## Requirements
 
